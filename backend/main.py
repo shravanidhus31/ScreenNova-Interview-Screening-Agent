@@ -415,3 +415,211 @@ def get_profile(current_user=Depends(get_current_user)):
         raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+# ─────────────────────────────────────────
+# INTERVIEW SESSION
+# ─────────────────────────────────────────
+
+class StartSessionModel(BaseModel):
+    job_id: str
+
+@app.post("/sessions/start")
+def start_session(data: StartSessionModel, current_user=Depends(get_current_user)):
+    try:
+        profile_result = supabase.table("users").select(
+            "skill_profile"
+        ).eq("id", str(current_user.id)).single().execute()
+
+        if not profile_result.data or not profile_result.data.get("skill_profile"):
+            raise HTTPException(status_code=400, detail="Please upload your resume first")
+
+        job_result = supabase.table("job_postings").select("*").eq(
+            "id", data.job_id
+        ).single().execute()
+
+        if not job_result.data:
+            raise HTTPException(status_code=404, detail="Job not found")
+
+        if not job_result.data.get("questions_approved"):
+            raise HTTPException(status_code=400, detail="Interview questions not approved yet for this job")
+
+        session_result = supabase.table("sessions").insert({
+            "user_id": str(current_user.id),
+            "job_id": data.job_id,
+            "status": "in_progress"
+        }).execute()
+
+        session = session_result.data[0]
+        session_id = session["id"]
+
+        approved_questions = supabase.table("question_bank").select("*").eq(
+            "job_id", data.job_id
+        ).eq("approved", True).order("order_num").execute()
+
+        questions_to_insert = []
+        for q in approved_questions.data:
+            questions_to_insert.append({
+                "session_id": session_id,
+                "bank_question_id": q["id"],
+                "text": q["text"],
+                "type": q["type"],
+                "difficulty": q["difficulty"],
+                "order_num": q["order_num"]
+            })
+
+        supabase.table("questions").insert(questions_to_insert).execute()
+
+        questions_result = supabase.table("questions").select("*").eq(
+            "session_id", session_id
+        ).order("order_num").execute()
+
+        return {
+            "message": "Interview session started",
+            "session_id": session_id,
+            "job": job_result.data,
+            "questions": questions_result.data
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.get("/sessions/{session_id}")
+def get_session(session_id: str, current_user=Depends(get_current_user)):
+    try:
+        session = supabase.table("sessions").select("*").eq(
+            "id", session_id
+        ).eq("user_id", str(current_user.id)).single().execute()
+
+        if not session.data:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        questions = supabase.table("questions").select("*").eq(
+            "session_id", session_id
+        ).order("order_num").execute()
+
+        return {
+            "session": session.data,
+            "questions": questions.data
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.get("/sessions/{session_id}/question/{question_id}")
+def get_question(session_id: str, question_id: str, current_user=Depends(get_current_user)):
+    try:
+        question = supabase.table("questions").select("*").eq(
+            "id", question_id
+        ).eq("session_id", session_id).single().execute()
+
+        if not question.data:
+            raise HTTPException(status_code=404, detail="Question not found")
+
+        existing_response = supabase.table("responses").select("*").eq(
+            "question_id", question_id
+        ).execute()
+
+        return {
+            "question": question.data,
+            "already_answered": len(existing_response.data) > 0
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+# ─────────────────────────────────────────
+# RESPONSES
+# ─────────────────────────────────────────
+
+class SubmitResponseModel(BaseModel):
+    session_id: str
+    question_id: str
+    text: str
+    voice_flag: bool = False
+
+@app.post("/responses/submit")
+def submit_response(data: SubmitResponseModel, current_user=Depends(get_current_user)):
+    try:
+        session = supabase.table("sessions").select("*").eq(
+            "id", data.session_id
+        ).eq("user_id", str(current_user.id)).single().execute()
+
+        if not session.data:
+            raise HTTPException(status_code=403, detail="Session not found or unauthorized")
+
+        if session.data["status"] == "completed":
+            raise HTTPException(status_code=400, detail="Session already completed")
+
+        existing = supabase.table("responses").select("*").eq(
+            "question_id", data.question_id
+        ).execute()
+
+        if existing.data:
+            raise HTTPException(status_code=400, detail="Question already answered")
+
+        response_result = supabase.table("responses").insert({
+            "question_id": data.question_id,
+            "session_id": data.session_id,
+            "text": data.text,
+            "voice_flag": data.voice_flag
+        }).execute()
+
+        all_questions = supabase.table("questions").select("id").eq(
+            "session_id", data.session_id
+        ).execute()
+
+        all_responses = supabase.table("responses").select("id").eq(
+            "session_id", data.session_id
+        ).execute()
+
+        total_questions = len(all_questions.data)
+        total_responses = len(all_responses.data)
+
+        if total_responses >= total_questions:
+            supabase.table("sessions").update(
+                {"status": "completed"}
+            ).eq("id", data.session_id).execute()
+
+            return {
+                "message": "Response submitted",
+                "response": response_result.data[0],
+                "session_status": "completed",
+                "all_answered": True
+            }
+
+        return {
+            "message": "Response submitted",
+            "response": response_result.data[0],
+            "session_status": "in_progress",
+            "answered": total_responses,
+            "total": total_questions,
+            "all_answered": False
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.get("/sessions/{session_id}/responses")
+def get_session_responses(session_id: str, current_user=Depends(get_current_user)):
+    try:
+        session = supabase.table("sessions").select("*").eq(
+            "id", session_id
+        ).eq("user_id", str(current_user.id)).single().execute()
+
+        if not session.data:
+            raise HTTPException(status_code=403, detail="Unauthorized")
+
+        responses = supabase.table("responses").select("*").eq(
+            "session_id", session_id
+        ).execute()
+
+        return {"responses": responses.data}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
