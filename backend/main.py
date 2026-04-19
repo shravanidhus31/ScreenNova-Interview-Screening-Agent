@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from routers import auth, jobs, resume, sessions, responses, evaluation
+from routers import auth, jobs, resume, sessions, responses, evaluation,hr
 
 app = FastAPI(title="ScreenNova Interview Screening API")
 
@@ -18,6 +18,7 @@ app.include_router(resume.router)
 app.include_router(sessions.router)
 app.include_router(responses.router)
 app.include_router(evaluation.router)
+app.include_router(hr.router)
 
 @app.get("/health")
 def health():
